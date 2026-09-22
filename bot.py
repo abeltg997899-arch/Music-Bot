@@ -1,7 +1,7 @@
 import os
 import asyncio
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import discord
@@ -11,7 +11,7 @@ import yt_dlp
 
 
 # =========================================================
-# TOKEN
+# CONFIGURATION
 # =========================================================
 
 TOKEN = os.getenv("MUSIC_BOT_TOKEN")
@@ -22,7 +22,50 @@ if not TOKEN:
 
 
 # =========================================================
-# DISCORD
+# YOUTUBE / YT-DLP
+# =========================================================
+
+YTDL_OPTIONS = {
+    "format": "bestaudio/best",
+    "quiet": True,
+    "no_warnings": True,
+    "noplaylist": True,
+    "skip_download": True,
+    "default_search": "ytsearch1",
+    "source_address": "0.0.0.0",
+
+    # Use cookies from Chrome
+    "cookiesfrombrowser": ("chrome",),
+
+    "extractor_args": {
+        "youtube": {
+            "player_client": ["web", "android"]
+        }
+    },
+}
+
+
+# =========================================================
+# FFMPEG
+# =========================================================
+
+FFMPEG_OPTIONS = {
+    "before_options": (
+        "-reconnect 1 "
+        "-reconnect_streamed 1 "
+        "-reconnect_delay_max 5"
+    ),
+    "options": (
+        "-vn "
+        "-ar 48000 "
+        "-ac 2 "
+        "-b:a 192k"
+    ),
+}
+
+
+# =========================================================
+# DISCORD BOT
 # =========================================================
 
 intents = discord.Intents.default()
@@ -32,51 +75,6 @@ bot = commands.Bot(
     command_prefix=commands.when_mentioned,
     intents=intents
 )
-
-
-# =========================================================
-# YT-DLP
-# =========================================================
-
-YTDL_OPTIONS = {
-    # Prioritize the best audio-only stream available.
-    "format": "bestaudio/best",
-
-    "quiet": True,
-    "no_warnings": True,
-    "noplaylist": True,
-    "skip_download": True,
-
-    # Search YouTube when the user enters a normal search.
-    "default_search": "ytsearch1",
-
-    "source_address": "0.0.0.0",
-
-    # Helps yt-dlp select a good YouTube client.
-    "extractor_args": {
-        "youtube": {
-            "player_client": ["android", "web"]
-        }
-    },
-}
-
-
-FFMPEG_OPTIONS = {
-    "before_options": (
-        "-reconnect 1 "
-        "-reconnect_streamed 1 "
-        "-reconnect_delay_max 5"
-    ),
-
-    # Discord voice uses 48 kHz stereo.
-    # Audio is streamed directly; no music file is saved.
-    "options": (
-        "-vn "
-        "-ar 48000 "
-        "-ac 2 "
-        "-b:a 192k"
-    ),
-}
 
 
 # =========================================================
@@ -92,21 +90,17 @@ class Song:
     requester: discord.Member
 
 
-@dataclass
 class GuildPlayer:
-    queue: list[Song] = field(default_factory=list)
-    current: Optional[Song] = None
-    loop: bool = False
-    volume: float = 1.0
-    player_task: Optional[asyncio.Task] = None
+    def __init__(self):
+        self.queue = []
+        self.current: Optional[Song] = None
+        self.loop = False
+        self.volume = 1.0
+        self.player_task = None
 
 
-players: dict[int, GuildPlayer] = {}
+players = {}
 
-
-# =========================================================
-# HELPERS
-# =========================================================
 
 def get_player(guild_id: int) -> GuildPlayer:
     if guild_id not in players:
@@ -114,6 +108,10 @@ def get_player(guild_id: int) -> GuildPlayer:
 
     return players[guild_id]
 
+
+# =========================================================
+# HELPERS
+# =========================================================
 
 def format_duration(seconds: int) -> str:
     if not seconds:
@@ -131,20 +129,14 @@ def format_duration(seconds: int) -> str:
     return f"{minutes}:{secs:02d}"
 
 
-async def get_song(query: str, requester: discord.Member) -> Optional[Song]:
-    print(f"Searching for: {query}")
-
-    search = query
+def get_song(query: str, requester: discord.Member) -> Optional[Song]:
 
     if not query.startswith(("http://", "https://")):
-        search = f"ytsearch1:{query}"
-
-    def extract():
-        with yt_dlp.YoutubeDL(YTDL_OPTIONS) as ydl:
-            return ydl.extract_info(search, download=False)
+        query = f"ytsearch1:{query}"
 
     try:
-        info = await asyncio.to_thread(extract)
+        with yt_dlp.YoutubeDL(YTDL_OPTIONS) as ydl:
+            info = ydl.extract_info(query, download=False)
 
         if not info:
             return None
@@ -157,40 +149,41 @@ async def get_song(query: str, requester: discord.Member) -> Optional[Song]:
 
             info = entries[0]
 
-        title = info.get("title", "Unknown title")
-        webpage_url = info.get("webpage_url") or info.get("original_url") or query
+        title = info.get("title", "Unknown")
+
+        webpage_url = info.get("webpage_url")
+
+        if not webpage_url:
+            webpage_url = info.get("original_url", "")
+
         duration = info.get("duration") or 0
 
         stream_url = info.get("url")
 
-        # Fallback: manually find the best audio format.
         if not stream_url:
             formats = info.get("formats", [])
 
             audio_formats = [
-                fmt
-                for fmt in formats
-                if fmt.get("url")
-                and fmt.get("acodec")
-                and fmt.get("acodec") != "none"
+                f
+                for f in formats
+                if f.get("url")
+                and f.get("acodec") not in (None, "none")
             ]
 
-            if not audio_formats:
-                return None
+            if audio_formats:
+                audio_formats.sort(
+                    key=lambda f: (
+                        f.get("abr") or 0,
+                        f.get("asr") or 0,
+                        f.get("filesize") or 0
+                    ),
+                    reverse=True
+                )
 
-            audio_formats.sort(
-                key=lambda fmt: (
-                    fmt.get("abr") or 0,
-                    fmt.get("asr") or 0,
-                    fmt.get("filesize") or 0
-                ),
-                reverse=True
-            )
+                stream_url = audio_formats[0].get("url")
 
-            stream_url = audio_formats[0]["url"]
-
-        print(f"Found: {title}")
-        print(f"Duration: {format_duration(duration)}")
+        if not stream_url:
+            return None
 
         return Song(
             title=title,
@@ -200,11 +193,8 @@ async def get_song(query: str, requester: discord.Member) -> Optional[Song]:
             requester=requester
         )
 
-    except Exception as error:
-        print("❌ YT-DLP ERROR")
-        print(f"Type: {type(error).__name__}")
-        print(f"Error: {error}")
-
+    except Exception as e:
+        print(f"❌ yt-dlp error: {type(e).__name__}: {e}")
         return None
 
 
@@ -215,42 +205,47 @@ async def ensure_voice(
     if not interaction.guild:
         return None
 
-    if not interaction.user.voice:
+    user = interaction.user
+
+    if not isinstance(user, discord.Member):
+        return None
+
+    if not user.voice or not user.voice.channel:
         await interaction.followup.send(
-            "❌ You need to be in a voice channel first.",
+            "❌ You must be in a voice channel first.",
             ephemeral=True
         )
         return None
 
-    channel = interaction.user.voice.channel
-
+    voice_channel = user.voice.channel
     voice_client = interaction.guild.voice_client
 
     try:
+
         if voice_client:
 
-            if voice_client.channel != channel:
-                print(f"Moving to voice channel: {channel.name}")
-                await voice_client.move_to(channel)
+            if voice_client.channel != voice_channel:
+                await voice_client.move_to(voice_channel)
 
             return voice_client
 
-        print(f"Joining voice channel: {channel.name}")
+        print(f"Joining voice channel: {voice_channel.name}")
 
-        voice_client = await channel.connect()
+        voice_client = await voice_channel.connect()
 
         print("✅ Successfully connected to voice.")
 
         return voice_client
 
-    except Exception as error:
-        print("❌ VOICE CONNECTION ERROR")
-        print(f"Type: {type(error).__name__}")
-        print(f"Error: {error}")
+    except Exception as e:
+
+        print(
+            f"❌ Voice connection error: "
+            f"{type(e).__name__}: {e}"
+        )
 
         await interaction.followup.send(
-            "❌ I couldn't join your voice channel.\n"
-            f"Error: `{type(error).__name__}: {error}`",
+            f"❌ I couldn't join the voice channel: `{e}`",
             ephemeral=True
         )
 
@@ -258,33 +253,43 @@ async def ensure_voice(
 
 
 # =========================================================
-# PLAYBACK
+# PLAYER
 # =========================================================
 
-async def play_next(guild: discord.Guild):
+async def play_next(
+    guild: discord.Guild,
+    voice_client: discord.VoiceClient
+):
 
     player = get_player(guild.id)
-    voice_client = guild.voice_client
 
     if not voice_client or not voice_client.is_connected():
         player.current = None
         return
 
-    if voice_client.is_playing():
-        return
-
     if player.loop and player.current:
+
         song = player.current
 
     else:
+
         if not player.queue:
             player.current = None
+
+            try:
+                await voice_client.disconnect()
+            except Exception:
+                pass
+
             return
 
         song = player.queue.pop(0)
         player.current = song
 
+    print(f"🎵 Playing: {song.title}")
+
     try:
+
         source = discord.FFmpegPCMAudio(
             song.url,
             **FFMPEG_OPTIONS
@@ -295,46 +300,45 @@ async def play_next(guild: discord.Guild):
             volume=player.volume
         )
 
-        def after_play(error):
+        def after_playing(error):
+
             if error:
                 print(
-                    f"Playback error: "
+                    f"❌ Playback error: "
                     f"{type(error).__name__}: {error}"
                 )
 
             asyncio.run_coroutine_threadsafe(
-                play_next(guild),
+                play_next(guild, voice_client),
                 bot.loop
             )
 
         voice_client.play(
             source,
-            after=after_play
+            after=after_playing
         )
 
-        print(f"▶️ Now playing: {song.title}")
+    except Exception as e:
 
-    except Exception as error:
-        print("❌ PLAYBACK ERROR")
-        print(f"Type: {type(error).__name__}")
-        print(f"Error: {error}")
+        print(
+            f"❌ Could not start playback: "
+            f"{type(e).__name__}: {e}"
+        )
 
         player.current = None
 
-        await play_next(guild)
+        await play_next(guild, voice_client)
 
 
-async def start_player(guild: discord.Guild):
+async def start_player(
+    guild: discord.Guild,
+    voice_client: discord.VoiceClient
+):
 
-    player = get_player(guild.id)
-
-    if player.player_task and not player.player_task.done():
+    if voice_client.is_playing():
         return
 
-    async def runner():
-        await play_next(guild)
-
-    player.player_task = asyncio.create_task(runner())
+    await play_next(guild, voice_client)
 
 
 # =========================================================
@@ -343,7 +347,7 @@ async def start_player(guild: discord.Guild):
 
 @bot.tree.command(
     name="play",
-    description="Play a song or add it to the queue."
+    description="Play a song or add it to the queue"
 )
 @app_commands.describe(
     query="Song name or YouTube URL"
@@ -366,40 +370,51 @@ async def play(
     if not voice_client:
         return
 
-    song = await get_song(
+    print(f"🔎 Searching for: {query}")
+
+    song = await asyncio.to_thread(
+        get_song,
         query,
         interaction.user
     )
 
     if not song:
+
         await interaction.followup.send(
-            "❌ I couldn't find that song."
+            "❌ I couldn't find or access that song."
         )
+
         return
 
     player = get_player(interaction.guild.id)
 
-    if voice_client.is_playing() or voice_client.is_paused():
-
-        player.queue.append(song)
-
-        position = len(player.queue)
-
-        await interaction.followup.send(
-            f"➕ Added to queue: **{song.title}**\n"
-            f"Position: **#{position}**"
-        )
-
-        return
+    was_playing = (
+        voice_client.is_playing()
+        or voice_client.is_paused()
+        or player.current is not None
+    )
 
     player.queue.append(song)
 
-    await start_player(interaction.guild)
+    if was_playing:
 
-    await interaction.followup.send(
-        f"▶️ Playing: **{song.title}**\n"
-        f"Duration: `{format_duration(song.duration)}`"
-    )
+        await interaction.followup.send(
+            f"🎵 **Added to queue:** {song.title}\n"
+            f"⏱️ Duration: `{format_duration(song.duration)}`\n"
+            f"📋 Position: `{len(player.queue)}`"
+        )
+
+    else:
+
+        await interaction.followup.send(
+            f"▶️ **Now playing:** {song.title}\n"
+            f"⏱️ Duration: `{format_duration(song.duration)}`"
+        )
+
+        await start_player(
+            interaction.guild,
+            voice_client
+        )
 
 
 # =========================================================
@@ -408,16 +423,22 @@ async def play(
 
 @bot.tree.command(
     name="pause",
-    description="Pause the current song."
+    description="Pause the current song"
 )
 async def pause(interaction: discord.Interaction):
+
+    if not interaction.guild:
+        return
 
     voice_client = interaction.guild.voice_client
 
     if not voice_client or not voice_client.is_playing():
+
         await interaction.response.send_message(
-            "❌ Nothing is currently playing."
+            "❌ Nothing is currently playing.",
+            ephemeral=True
         )
+
         return
 
     voice_client.pause()
@@ -433,16 +454,22 @@ async def pause(interaction: discord.Interaction):
 
 @bot.tree.command(
     name="resume",
-    description="Resume the current song."
+    description="Resume the current song"
 )
 async def resume(interaction: discord.Interaction):
+
+    if not interaction.guild:
+        return
 
     voice_client = interaction.guild.voice_client
 
     if not voice_client or not voice_client.is_paused():
+
         await interaction.response.send_message(
-            "❌ Music isn't paused."
+            "❌ Music is not paused.",
+            ephemeral=True
         )
+
         return
 
     voice_client.resume()
@@ -458,16 +485,22 @@ async def resume(interaction: discord.Interaction):
 
 @bot.tree.command(
     name="skip",
-    description="Skip the current song."
+    description="Skip the current song"
 )
 async def skip(interaction: discord.Interaction):
+
+    if not interaction.guild:
+        return
 
     voice_client = interaction.guild.voice_client
 
     if not voice_client or not voice_client.is_playing():
+
         await interaction.response.send_message(
-            "❌ Nothing is currently playing."
+            "❌ Nothing is currently playing.",
+            ephemeral=True
         )
+
         return
 
     voice_client.stop()
@@ -483,7 +516,7 @@ async def skip(interaction: discord.Interaction):
 
 @bot.tree.command(
     name="stop",
-    description="Stop music and clear the queue."
+    description="Stop music and clear the queue"
 )
 async def stop(interaction: discord.Interaction):
 
@@ -497,7 +530,10 @@ async def stop(interaction: discord.Interaction):
     player.current = None
     player.loop = False
 
-    if voice_client and voice_client.is_playing():
+    if voice_client and (
+        voice_client.is_playing()
+        or voice_client.is_paused()
+    ):
         voice_client.stop()
 
     await interaction.response.send_message(
@@ -511,7 +547,7 @@ async def stop(interaction: discord.Interaction):
 
 @bot.tree.command(
     name="queue",
-    description="Show the current music queue."
+    description="Show the current music queue"
 )
 async def queue(interaction: discord.Interaction):
 
@@ -521,39 +557,56 @@ async def queue(interaction: discord.Interaction):
     player = get_player(interaction.guild.id)
 
     if not player.current and not player.queue:
+
         await interaction.response.send_message(
-            "📭 The queue is empty."
+            "📋 The queue is empty."
         )
+
         return
 
-    lines = []
+    embed = discord.Embed(
+        title="🎵 Music Queue"
+    )
 
     if player.current:
-        lines.append(
-            f"🎵 **Now playing:** {player.current.title}"
+
+        embed.add_field(
+            name="▶️ Now Playing",
+            value=(
+                f"**{player.current.title}**\n"
+                f"`{format_duration(player.current.duration)}`"
+            ),
+            inline=False
         )
 
     if player.queue:
 
-        lines.append("")
-        lines.append("**Up next:**")
+        queue_text = ""
 
         for index, song in enumerate(
             player.queue[:10],
             start=1
         ):
-            lines.append(
-                f"`{index}.` {song.title} "
-                f"`[{format_duration(song.duration)}]`"
+
+            queue_text += (
+                f"`{index}.` **{song.title}** "
+                f"`{format_duration(song.duration)}`\n"
             )
 
         if len(player.queue) > 10:
-            lines.append(
-                f"\n...and {len(player.queue) - 10} more."
+            queue_text += (
+                f"\n...and "
+                f"{len(player.queue) - 10} more."
             )
 
+        embed.add_field(
+            name="📋 Up Next",
+            value=queue_text,
+            inline=False
+        )
+
     await interaction.response.send_message(
-        "\n".join(lines)
+        embed=embed
     )
 
 
@@ -563,7 +616,7 @@ async def queue(interaction: discord.Interaction):
 
 @bot.tree.command(
     name="nowplaying",
-    description="Show the currently playing song."
+    description="Show the currently playing song"
 )
 async def nowplaying(interaction: discord.Interaction):
 
@@ -573,15 +626,42 @@ async def nowplaying(interaction: discord.Interaction):
     player = get_player(interaction.guild.id)
 
     if not player.current:
+
         await interaction.response.send_message(
             "❌ Nothing is currently playing."
         )
+
         return
 
+    song = player.current
+
+    embed = discord.Embed(
+        title="🎵 Now Playing",
+        description=f"**{song.title}**"
+    )
+
+    embed.add_field(
+        name="Duration",
+        value=format_duration(song.duration)
+    )
+
+    embed.add_field(
+        name="Requested by",
+        value=song.requester.display_name
+    )
+
+    embed.add_field(
+        name="Volume",
+        value=f"{int(player.volume * 100)}%"
+    )
+
+    embed.add_field(
+        name="Loop",
+        value="Enabled" if player.loop else "Disabled"
+    )
+
     await interaction.response.send_message(
-        f"🎵 **{player.current.title}**\n"
-        f"Duration: `{format_duration(player.current.duration)}`\n"
-        f"Requested by: {player.current.requester.mention}"
+        embed=embed
     )
 
 
@@ -591,14 +671,14 @@ async def nowplaying(interaction: discord.Interaction):
 
 @bot.tree.command(
     name="volume",
-    description="Change the music volume."
+    description="Change the music volume"
 )
 @app_commands.describe(
-    volume="Volume from 1 to 100"
+    volume="Volume from 0 to 100"
 )
 async def volume(
     interaction: discord.Interaction,
-    volume: app_commands.Range[int, 1, 100]
+    volume: app_commands.Range[int, 0, 100]
 ):
 
     if not interaction.guild:
@@ -610,15 +690,14 @@ async def volume(
 
     voice_client = interaction.guild.voice_client
 
-    if (
-        voice_client
-        and voice_client.source
-        and isinstance(
+    if voice_client and voice_client.source:
+
+        if isinstance(
             voice_client.source,
             discord.PCMVolumeTransformer
-        )
-    ):
-        voice_client.source.volume = player.volume
+        ):
+
+            voice_client.source.volume = player.volume
 
     await interaction.response.send_message(
         f"🔊 Volume set to **{volume}%**."
@@ -631,7 +710,7 @@ async def volume(
 
 @bot.tree.command(
     name="loop",
-    description="Toggle loop mode."
+    description="Toggle loop for the current song"
 )
 async def loop(interaction: discord.Interaction):
 
@@ -643,13 +722,16 @@ async def loop(interaction: discord.Interaction):
     player.loop = not player.loop
 
     if player.loop:
-        await interaction.response.send_message(
-            "🔁 Loop mode **enabled**."
-        )
+
+        message = "🔁 Loop enabled."
+
     else:
-        await interaction.response.send_message(
-            "➡️ Loop mode **disabled**."
-        )
+
+        message = "➡️ Loop disabled."
+
+    await interaction.response.send_message(
+        message
+    )
 
 
 # =========================================================
@@ -658,7 +740,7 @@ async def loop(interaction: discord.Interaction):
 
 @bot.tree.command(
     name="shuffle",
-    description="Shuffle the music queue."
+    description="Shuffle the music queue"
 )
 async def shuffle(interaction: discord.Interaction):
 
@@ -668,9 +750,11 @@ async def shuffle(interaction: discord.Interaction):
     player = get_player(interaction.guild.id)
 
     if len(player.queue) < 2:
+
         await interaction.response.send_message(
             "❌ You need at least 2 songs in the queue."
         )
+
         return
 
     random.shuffle(player.queue)
@@ -686,14 +770,14 @@ async def shuffle(interaction: discord.Interaction):
 
 @bot.tree.command(
     name="remove",
-    description="Remove a song from the queue."
+    description="Remove a song from the queue"
 )
 @app_commands.describe(
-    position="Queue position"
+    position="Position of the song in the queue"
 )
 async def remove(
     interaction: discord.Interaction,
-    position: app_commands.Range[int, 1, 100]
+    position: app_commands.Range[int, 1, 1000]
 ):
 
     if not interaction.guild:
@@ -703,10 +787,13 @@ async def remove(
 
     index = position - 1
 
-    if index >= len(player.queue):
+    if index < 0 or index >= len(player.queue):
+
         await interaction.response.send_message(
-            "❌ That queue position doesn't exist."
+            "❌ That queue position does not exist.",
+            ephemeral=True
         )
+
         return
 
     song = player.queue.pop(index)
@@ -722,7 +809,7 @@ async def remove(
 
 @bot.tree.command(
     name="clear",
-    description="Clear the music queue."
+    description="Clear all songs from the queue"
 )
 async def clear(interaction: discord.Interaction):
 
@@ -736,7 +823,7 @@ async def clear(interaction: discord.Interaction):
     player.queue.clear()
 
     await interaction.response.send_message(
-        f"🗑️ Cleared **{amount}** songs from the queue."
+        f"🗑️ Removed **{amount}** song(s) from the queue."
     )
 
 
@@ -746,7 +833,7 @@ async def clear(interaction: discord.Interaction):
 
 @bot.tree.command(
     name="disconnect",
-    description="Disconnect the bot from the voice channel."
+    description="Disconnect the bot from the voice channel"
 )
 async def disconnect(interaction: discord.Interaction):
 
@@ -761,6 +848,7 @@ async def disconnect(interaction: discord.Interaction):
     player.loop = False
 
     if voice_client:
+
         if voice_client.is_playing():
             voice_client.stop()
 
@@ -769,10 +857,54 @@ async def disconnect(interaction: discord.Interaction):
         await interaction.response.send_message(
             "👋 Disconnected from the voice channel."
         )
+
+    else:
+
+        await interaction.response.send_message(
+            "❌ I'm not connected to a voice channel.",
+            ephemeral=True
+        )
+
+
+# =========================================================
+# /LEAVE
+# =========================================================
+
+@bot.tree.command(
+    name="leave",
+    description="Leave the current voice channel"
+)
+async def leave(interaction: discord.Interaction):
+
+    if not interaction.guild:
         return
 
+    voice_client = interaction.guild.voice_client
+    player = get_player(interaction.guild.id)
+
+    if not voice_client:
+
+        await interaction.response.send_message(
+            "❌ I'm not in a voice channel.",
+            ephemeral=True
+        )
+
+        return
+
+    # Stop the current song
+    if voice_client.is_playing() or voice_client.is_paused():
+        voice_client.stop()
+
+    # Clear music state
+    player.queue.clear()
+    player.current = None
+    player.loop = False
+
+    # Leave voice channel
+    await voice_client.disconnect()
+
     await interaction.response.send_message(
-        "❌ I'm not connected to a voice channel."
+        "👋 I've left the voice channel."
     )
 
 
@@ -783,29 +915,39 @@ async def disconnect(interaction: discord.Interaction):
 @bot.event
 async def on_ready():
 
-    print(
-        f"🎵 Music bot connected as {bot.user}"
-    )
+    print("======================================")
+    print(f"Logged in as: {bot.user}")
+    print(f"Bot ID: {bot.user.id}")
+    print("======================================")
 
     try:
+
         synced = await bot.tree.sync()
 
         print(
-            f"✅ Slash commands synchronized: {len(synced)}"
+            f"✅ Slash commands synchronized: "
+            f"{len(synced)}"
         )
 
-    except Exception as error:
+        print("Available commands:")
 
-        print("❌ Slash command sync error:")
+        for command in synced:
+            print(f"  /{command.name}")
+
+    except Exception as e:
+
         print(
-            f"{type(error).__name__}: {error}"
+            f"❌ Failed to sync slash commands: "
+            f"{type(e).__name__}: {e}"
         )
 
-    print("🎵 Music bot is ready!")
+    print("🎵 Music bot is ready.")
 
 
 # =========================================================
 # START
 # =========================================================
+
+print("Starting Music Abel Uncopylocked...")
 
 bot.run(TOKEN)
