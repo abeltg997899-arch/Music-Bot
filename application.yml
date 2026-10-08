@@ -40,7 +40,7 @@ lavalink:
       snapshot: false
 
   server:
-    password: "CHANGE_THIS_PASSWORD"
+    password: "Abel997899"
 
     sources:
       youtube: false
