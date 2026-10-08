@@ -5,15 +5,16 @@ server:
 plugins:
   lavasrc:
     providers:
-      - "dzsearch:%QUERY%"
+      - "ytsearch:%QUERY%"
+      - "scsearch:%QUERY%"
 
     sources:
       spotify: false
       applemusic: false
-      deezer: true
+      deezer: false
       yandexmusic: false
       flowerytts: false
-      youtube: false
+      youtube: true
       vkmusic: false
       tidal: false
       qobuz: false
@@ -23,16 +24,10 @@ plugins:
     lyrics-sources:
       spotify: false
       deezer: false
-      youtube: false
+      youtube: true
       yandexmusic: false
       vkmusic: false
       lrcLib: true
-
-    deezer:
-      formats:
-        - "MP3_128"
-        - "MP3_64"
-        - "AAC_64"
 
 lavalink:
   plugins:
@@ -42,8 +37,9 @@ lavalink:
 
   server:
     password: "CHANGE_THIS_PASSWORD"
+
     sources:
-      youtube: false
+      youtube: true
       bandcamp: false
       soundcloud: true
       twitch: false
