@@ -14,7 +14,7 @@ plugins:
       deezer: false
       yandexmusic: false
       flowerytts: false
-      youtube: true
+      youtube: false
       vkmusic: false
       tidal: false
       qobuz: false
@@ -24,7 +24,7 @@ plugins:
     lyrics-sources:
       spotify: false
       deezer: false
-      youtube: true
+      youtube: false
       yandexmusic: false
       vkmusic: false
       lrcLib: true
@@ -35,14 +35,19 @@ lavalink:
       repository: "https://maven.lavalink.dev/releases"
       snapshot: false
 
+    - dependency: "dev.lavalink.youtube:youtube-plugin:1.18.2"
+      repository: "https://maven.lavalink.dev/releases"
+      snapshot: false
+
   server:
     password: "CHANGE_THIS_PASSWORD"
 
     sources:
-      youtube: true
+      youtube: false
       bandcamp: false
       soundcloud: true
       twitch: false
       vimeo: false
+      nico: false
       http: true
       local: false
